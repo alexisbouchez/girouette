@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"log/slog"
+	"net/http"
 	"net/mail"
 	"os"
 	"time"
@@ -40,12 +43,54 @@ func (s *session) Rcpt(to string, opts *smtp.RcptOptions) error {
 }
 
 func (s *session) Data(r io.Reader) error {
-	// Read the message
 	msg, err := mail.ReadMessage(r)
 	if err != nil {
 		return err
 	}
-	fmt.Println("Data", msg)
+
+	sender := msg.Header.Get("From")
+	recipients := msg.Header.Get("To")
+	subject := msg.Header.Get("Subject")
+	body, err := io.ReadAll(msg.Body)
+	if err != nil {
+		return err
+	}
+
+	webhookURL := env.GetVar("WEBHOOK_ENDPOINT", "")
+	if webhookURL == "" {
+		return fmt.Errorf("missing webhook endpoint in environment variables")
+	}
+
+	payload := map[string]string{
+		"from":    sender,
+		"to":      recipients,
+		"subject": subject,
+		"body":    string(body),
+	}
+
+	jsonPayload, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal JSON payload: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", webhookURL, bytes.NewBuffer(jsonPayload))
+	if err != nil {
+		return fmt.Errorf("failed to create HTTP request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send webhook: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("webhook returned non-200 status: %d", resp.StatusCode)
+	}
+
+	fmt.Println("Webhook sent successfully")
 	return nil
 }
 
